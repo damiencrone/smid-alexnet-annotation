@@ -1,0 +1,132 @@
+---
+title: "Predicting normative ratings of images from the Socio-Moral Image Database using visual features from AlexNet"
+author: "Damien Crone"
+output: html_notebook
+---
+
+Previous research has shown that deep convolutional neural networks (such as AlexNet; [Krizhevsky et al, 2012](http://papers.nips.cc/paper/4824-imagenet-classification-with-deep-convolutional-neural-networks)) can explain a substantial proportion of variance in human similarity judgments (e.g., [Jozwik et al., 2017](http://journal.frontiersin.org/article/10.3389/fpsyg.2017.01726/full)).
+
+In this document, I use features from a pre-trained neural network (AlexNet), obtained using the MATLAB Deep Learning Toolbox (see separate MATLAB code), to estimate normative ratings of various moral and emotional features of images from the Socio-Moral Image Database ([Crone et al., 2018](https://dx.doi.org/10.1371/journal.pone.0190954), [osf.io/2rqad/](https://osf.io/2rqad/)), using cross-validated, penalized regression.
+
+```{r load_data}
+
+library(caret)
+
+# Specify variables to be predicted
+dv_vec = c(
+  "harm_mean", "fairness_mean", "ingroup_mean", "authority_mean", "purity_mean",
+  "moral_mean", "valence_mean", "arousal_mean"
+)
+
+# Load norms from original norming study (Crone et al. 2018, PLoS ONE,
+# https://osf.io/2rqad/), and reduce to variables to be predicted
+smid_norms = read.csv(
+  file = "~/Desktop/smid_norms.csv",
+  row.names = 1
+)
+smid_norms = smid_norms[,dv_vec]
+
+# Load final layer of alexnet and add to SMID norms
+alexnet_fc8 = read.csv("~/Desktop/alexnet_fc8.csv", row.names = 1)
+alexnet_fc8 = alexnet_fc8[rownames(smid_norms),]
+smid_norms[, colnames(alexnet_fc8)] = NA
+smid_norms[, colnames(alexnet_fc8)] = alexnet_fc8
+alexnet_fc8_vec = colnames(alexnet_fc8)
+rm(alexnet_fc8)
+
+```
+
+In the code below, for each of the `r length(dv_vec)` outcome variables, I perform `r n_folds`-fold cross-validation with `r n_repeats` random partitions of the data, using the Lasso method in the `caret` package. In each model, the outcome variable (e.g., each image's average valence rating) is modelled as a weighted linear combination of the 1000-dimensional feature vector obtained from the final fully-connected layer (FC8) of AlexNet.
+
+```{r perform_cv_regression}
+
+# Initialise results list
+reg_list = list()
+
+# Specify cross-validation parameters
+n_folds = 4
+n_repeats = 10
+
+# Perform cross-validated regressions for each outcome variable
+for (dv in dv_vec) {
+
+  f = as.formula(paste(dv, " ~ ", paste(alexnet_fc8_vec, collapse = " + ")))
+
+  # Select cases with available data
+  col_ind = c(dv, alexnet_fc8_vec)
+  row_ind = complete.cases(smid_norms[, col_ind])
+  mod_dat = smid_norms[row_ind, col_ind]
+
+  set.seed(123)
+  reg_list[[dv]] = train(
+    form = f,
+    data = mod_dat,
+    method = "lasso",
+    trControl = trainControl(
+      method = "repeatedcv",
+      number = n_folds,
+      repeats = n_repeats,
+      verboseIter = FALSE
+    )
+  )
+
+}
+
+```
+
+As shown in the table and figure below, the AlexNet features were able to succesfully predict normative ratings on all dimensions, however R-squared values were not exceptionally high, ranging from .14 (Morality) to .22 (Authority). Given that AlexNet was originally trained for 1000-way object classification, rather than predicting abstract semantic dimensions, such is perhaps unsurprising.
+
+```{r extract_results}
+
+# Extract R^2 values for final models
+results = data.frame(
+  Outcome = dv_vec,
+  RSquared = sapply(X = reg_list, FUN = function(x) round(max(x$results$Rsquared), 3)),
+  row.names = NULL
+)
+
+results = results[order(results$RSquared, decreasing = TRUE),]
+
+print(results)
+
+```
+
+```{r display_model_predictions}
+
+par(mfrow = c(2, 4))
+
+for (dv in dv_vec) {
+
+  # Select cases with available data
+  col_ind = c(dv, alexnet_fc8_vec)
+  row_ind = complete.cases(smid_norms[, col_ind])
+  mod_dat = smid_norms[row_ind, col_ind]
+
+  set.seed(123)
+  mod_pred = predict(
+    object = reg_list[[dv]],
+    bewdata = mod_dat[, alexnet_fc8_vec]
+  )
+  
+  plot(
+    x = mod_dat[, dv],
+    y = mod_pred,
+    xlim = c(1, 5),
+    ylim = c(1, 5),
+    main = dv,
+    xlab = "Observed",
+    ylab = "Predicted",
+    cex = 1/5
+  )
+  
+  abline(a = c(0, 1))
+
+}
+
+```
+
+```{r save_model_objects}
+
+save(reg_list, file = "reg_list.RData")
+
+```
